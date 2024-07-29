@@ -4,9 +4,12 @@ import torch.nn as nn
 import torch
 from peft import LoraConfig, get_peft_model, LoftQConfig
 
-VIT_HIDDEN_STATE = 768
-VIT_SEQ_LENGTH = 49
+import sys
+import os
+# Add the parent directory of the modules folder to the Python path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+from modules.neuralvismem import Brain
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
@@ -28,9 +31,10 @@ def print_trainable_parameters(model):
 
 class DriveVLMT5(nn.Module):
 
-    def __init__(self, config):
-
+    def __init__(self, config, tokenizer=None):
         super().__init__()
+        
+        self.tokenizer = tokenizer  # Store the tokenizer
 
         # Make tokenizer and text model
         if config.lm == 'T5-Base':
@@ -53,106 +57,73 @@ class DriveVLMT5(nn.Module):
             self.model = get_peft_model(self.model, lora_config)
 
         hidden_size = self.model.config.d_model
-
         print('Trainable Parameters for LM model:')
         print_trainable_parameters(self.model)
 
         # Create instance for multi-view processor
-        self.mvp = self.MultiViewProcessor(config.gpa_hidden_size, hidden_size, config.lm, freeze=True)
+        self.mvp = self.MultiViewProcessor(config.gpa_hidden_size, hidden_size, config.lm, self.tokenizer, freeze=True)
+
 
     class MultiViewProcessor(nn.Module):
-
-        def __init__(self, gpa_hidden_size, hidden_size, lm, freeze=False):
-
+        def __init__(self, gpa_hidden_size, hidden_size, lm, tokenizer, freeze=False):
             super().__init__()
 
-            # Use ViT for image embeddings
-            self.img_model = vit_b_32(weights='DEFAULT')
+            # Store the tokenizer
+            self.tokenizer = tokenizer
+
+            # Use the Brain model for image embeddings
+            self.img_model = Brain()
             self.lm = lm
 
             # Modal embedding to distinguish between image and text
             self.modal_embeddings = nn.Embedding(2, hidden_size)
             self.modal_embeddings.weight.data.normal_(mean=0.0, std=0.02)
 
-            # If we are freezing the CLIP embeddings
-            if freeze:
-                for param in self.img_model.parameters():
-                    param.requires_grad = False
+        def get_img_embedding(self, imgs, cls_tokens):
+            # Ensure imgs and cls_tokens are lists
+            print(f"in mvp get img embedding, imgs shape: ", imgs.shape, f"   cls tokens shape {cls_tokens.shape}")
+            imgs = [imgs[:,i,:,:,:] for i in range(imgs.shape[1])] if not isinstance(imgs, list) else imgs
+            cls_tokens = [cls_tokens[:,i,:] for i in range(cls_tokens.shape[1])] if not isinstance(cls_tokens, list) else cls_tokens
 
-            # Set matrices based on MIVC paper
-            self.w = nn.Linear(in_features=gpa_hidden_size, out_features=1)
-            self.Z = nn.Sequential(
-                nn.Linear(in_features=VIT_HIDDEN_STATE * VIT_SEQ_LENGTH, out_features=gpa_hidden_size, bias=False),
-                nn.Tanh()
-            )
-            self.G = nn.Sequential(
-                nn.Linear(in_features=VIT_HIDDEN_STATE * VIT_SEQ_LENGTH, out_features=gpa_hidden_size, bias=False),
-                nn.Sigmoid()
-            )
+            # Pass images and CLS tokens through the Brain model
+            memory_network_activations = self.img_model(imgs, cls_tokens)  # List of (batch_size, hidden_size) tensors
 
+            # Project to VL dimension if using T5-Large
             if self.lm != 'T5-Base':
-                self.img_projection_layer = nn.Linear(in_features=VIT_HIDDEN_STATE, out_features=hidden_size)
-
-        def gpa(self, img_embeddings):
-
-            """"
-            Calculates the gated-pooling attention score for the image embeddings
-            :param img_embeddings: (6x768) dimensional
-            :return single embedding of size (768,)
-            """
-
-            # Get weights for gated pooling attention
-            gpa_weights = torch.softmax(self.w(self.Z(img_embeddings) * self.G(img_embeddings)), dim=0)
-
-            # Take a linear combination of all the image embeddings
-            fused_embeddings = torch.sum(gpa_weights * img_embeddings, dim=0)
-
-            return fused_embeddings
-
-        def get_img_embedding(self, imgs):
-
-            N = imgs.shape[0]
-
-            # Process into patches (N x 6 x 49 x H)
-            merged_embedding = torch.stack([self.img_model._process_input(img) for img in imgs], dim=0)
-
-            # Concatenate the batch class tokens -> (N, 6, 50, H)
-            batch_class_tokens = self.img_model.class_token.expand(merged_embedding.shape[1], -1, -1).repeat(N, 1, 1, 1)
-            merged_embedding = torch.cat([batch_class_tokens, merged_embedding], dim=2)
-
-            # Add positional embeddings and remove class token -> (N, 6, 49, H)
-            merged_embedding += self.img_model.encoder.pos_embedding.repeat(N, 1, 1, 1)
-            merged_embedding = merged_embedding[:, :, 1:]
-
-            # Get merged embedding and reshape to 2D embedding -> (N, 1, 49, H)
-            merged_embedding = torch.stack([self.gpa(embedding.flatten(start_dim=1)).reshape(VIT_SEQ_LENGTH,
-                                                                                             VIT_HIDDEN_STATE) for
-                                            embedding in merged_embedding], dim=0)
-
-            # Project to VL dimension -> (1, 49, H) (H is 512 for t5-small, 768 for t5-base)
-            if self.lm != 'T5-Base':
-                merged_embedding = self.img_projection_layer(merged_embedding)
+                memory_network_activations = self.img_projection_layer(memory_network_activations)
 
             # Add modal type embedding to merged embedding
-            merged_embedding += self.modal_embeddings(
-                torch.ones((1, merged_embedding.shape[1]), dtype=torch.int, device=device))
+            memory_network_activations += self.modal_embeddings(
+                torch.ones((memory_network_activations.shape[0], memory_network_activations.shape[1]), dtype=torch.int, device=memory_network_activations.device)
+            )
 
-            return merged_embedding
+            return memory_network_activations
 
         def forward(self, text_enc, imgs, text_model):
-
-            # Get the image embeddings (N x 1 x 49 x H)
-            imgs_embedding = self.get_img_embedding(imgs)
-
-            # Get the text embeddings (N x S x H)
+            # Get the text embeddings (batch_size, seq_length, hidden_size)
             text_embeddings = text_model.get_input_embeddings()(text_enc)
+            print(f"in mvp forward, text_embeddings shape: ", text_embeddings.shape)
+
+            # Add 3 cls token embeddings to the end of text embeddings
+            cls_token_id = self.tokenizer.convert_tokens_to_ids('<cls>')  # Use the tokenizer to get the ID
+            cls_token_embeds = text_model.get_input_embeddings()(torch.tensor([cls_token_id]*3, device=text_enc.device))
+            cls_token_embeds = cls_token_embeds.unsqueeze(0).expand(text_embeddings.size(0), -1, -1)
+            text_embeddings = torch.cat([text_embeddings, cls_token_embeds], dim=1)
+
+            # Calculate self-attention using T5 encoder layers
+            attention_mask = torch.ones(text_embeddings.size()[:-1], device=text_enc.device)
+            outputs = text_model.encoder(inputs_embeds=text_embeddings, attention_mask=attention_mask)
+            cls_tokens = outputs.last_hidden_state[:, -3:, :]  # Extract the last 3 tokens (CLS tokens)
+            text_embeddings = outputs.last_hidden_state[:, :-3, :]  # Remove the CLS tokens from the sequence
+
+            # Pass images and CLS tokens through Brain model
+            img_embeddings = self.get_img_embedding(imgs, cls_tokens)
 
             # Add modal embeddings to text
             text_embeddings += self.modal_embeddings(torch.zeros((1, text_embeddings.shape[1]), dtype=torch.int,
                                                                  device=device))
-
-            # Concatenate embeddings -> (1 x S x 512)
-            merged_embedding = torch.cat([text_embeddings, imgs_embedding], dim=1)
+            # Concatenate text and image embeddings
+            merged_embedding = torch.cat([text_embeddings, img_embeddings], dim=1)
 
             return merged_embedding
 

@@ -227,6 +227,8 @@ def params():
 
 if __name__ == '__main__':
 
+    torch.autograd.set_detect_anomaly(True)
+
     timestr = time.strftime("%Y%m%d-%H%M%S")
 
     config = params()
@@ -239,10 +241,6 @@ if __name__ == '__main__':
     epochs_ran = 0
 
     # Load processors and models
-    model = DriveVLMT5(config)
-    model.to(device)
-    print('Trainable Parameters for full model')
-    print_trainable_parameters(model)
 
     if config.lm == 'T5-Base':
         processor = T5Tokenizer.from_pretrained('google-t5/t5-base')
@@ -250,41 +248,49 @@ if __name__ == '__main__':
         processor = T5Tokenizer.from_pretrained('google-t5/t5-large')
 
     processor.add_tokens('<')
+    # Add the cls token to the tokenizer
+    cls_token = '<cls>'
+    special_tokens_dict = {'additional_special_tokens': [cls_token]}
+    processor.add_special_tokens(special_tokens_dict)
+    # Get the token ID for the new CLS token
+    cls_token_id = processor.convert_tokens_to_ids(cls_token)
+    
+    model = DriveVLMT5(config, tokenizer=processor)  # Pass the tokenizer here
+    model.to(device)
+    print('Trainable Parameters for full model')
+    print_trainable_parameters(model)
 
     train_dset = MultiFrameDataset(
-        input_file=os.path.join('data', 'multi_frame',
-                                'multi_frame_train.json'),
+        input_file=os.path.join('data', 'multi_frame_sorted',
+                                'sorted_multi_frame_train.json'),
         tokenizer=processor,
         transform=transforms.Compose([
-            transforms.Resize((224, 224)),
             transforms.Normalize((127.5, 127.5, 127.5), (127.5, 127.5, 127.5))
         ])
     )
     val_dset = MultiFrameDataset(
-        input_file=os.path.join('data', 'multi_frame',
-                                'multi_frame_val.json'),
+        input_file=os.path.join('data', 'multi_frame_sorted',
+                                'sorted_multi_frame_val.json'),
         tokenizer=processor,
         transform=transforms.Compose([
-            transforms.Resize((224, 224)),
             transforms.Normalize((127.5, 127.5, 127.5), (127.5, 127.5, 127.5))
         ])
     )
     test_dset = MultiFrameDataset(
-        input_file=os.path.join('data', 'multi_frame',
-                                'multi_frame_test.json'),
+        input_file=os.path.join('data', 'multi_frame_sorted',
+                                'sorted_multi_frame_test.json'),
         tokenizer=processor,
         transform=transforms.Compose([
-            transforms.Resize((224, 224)),
             transforms.Normalize((127.5, 127.5, 127.5), (127.5, 127.5, 127.5))
         ])
     )
 
     # Create Dataloaders
-    train_dataloader = DataLoader(train_dset, shuffle=True, batch_size=config.batch_size,
+    train_dataloader = DataLoader(train_dset, shuffle=False, batch_size=config.batch_size,
                                   num_workers=config.num_workers, collate_fn=train_dset.collate_fn)
-    val_dataloader = DataLoader(val_dset, shuffle=True, batch_size=config.batch_size,
+    val_dataloader = DataLoader(val_dset, shuffle=False, batch_size=config.batch_size,
                                 num_workers=config.num_workers, collate_fn=train_dset.collate_fn)
-    test_dataloader = DataLoader(test_dset, shuffle=True, batch_size=config.batch_size,
+    test_dataloader = DataLoader(test_dset, shuffle=False, batch_size=config.batch_size,
                                  num_workers=config.num_workers, collate_fn=train_dset.collate_fn)
 
     if not config.hf_train:
@@ -297,7 +303,7 @@ if __name__ == '__main__':
             # Load the model and stats from the checkpoint
             model.load_state_dict(torch.load(os.path.join('multi_frame_results', config.checkpoint_file,
                                                           'latest_model.pth')))
-            best_model = DriveVLMT5(config)
+            best_model = DriveVLMT5(config, tokenizer=processor)  # Pass the tokenizer here
             best_model.load_state_dict(torch.load(os.path.join('multi_frame_results', config.checkpoint_file,
                                                                'latest_model.pth')))
 
@@ -325,7 +331,7 @@ if __name__ == '__main__':
             lr = config.learning_rate
 
         min_train_loss, min_val_loss = custom_train(min_train_loss, min_val_loss, best_model, epochs_ran, lr)
-        best_model = DriveVLMT5(config)
+        best_model = DriveVLMT5(config, tokenizer=processor)  # Pass the tokenizer here
         best_model.load_state_dict(torch.load(os.path.join('multi_frame_results', timestr, 'latest_model.pth')))
         best_model.to(device)
         test_loss = val_model(test_dataloader, best_model)
