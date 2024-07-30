@@ -75,8 +75,8 @@ def custom_train(train_loss, val_loss, best_model, epochs, learning_rate):
 
             # print(inputs.shape, imgs.shape, labels.shape)
             i += 1
-            if i % 20 == 0:
-                torch.cuda.empty_cache()
+            # if i % 20 == 0:
+            #     torch.cuda.empty_cache()
             # Forward pass through model
             outputs = model(inputs, imgs, labels)
 
