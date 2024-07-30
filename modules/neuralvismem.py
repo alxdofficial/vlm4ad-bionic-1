@@ -4,9 +4,9 @@ import torch.nn.functional as F
 
 # Define the input and output dimensions for internal modules
 INTERNAL_DIM = 768
-NUM_SUB_NETWORKS = 2
-NUM_LAYERS = 2
-NUM_MEMORY_NETWORKS = 6
+NUM_SUB_NETWORKS = 4
+NUM_LAYERS = 3
+NUM_MEMORY_NETWORKS = 8
 IMG_WIDTH = 1600
 IMG_HEIGHT = 900
 

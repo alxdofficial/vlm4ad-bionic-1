@@ -103,7 +103,7 @@ class DriveVLMT5(nn.Module):
             # Get the text embeddings (batch_size, seq_length, hidden_size)
             text_embeddings = text_model.get_input_embeddings()(text_enc)
             # print(f"in mvp forward, text_embeddings shape: ", text_embeddings.shape)
-            num_cls = 6
+            num_cls = 3
             # Add num_cls cls token embeddings to the end of text embeddings
             cls_token_id = self.tokenizer.convert_tokens_to_ids('<cls>')  # Use the tokenizer to get the ID
             cls_token_embeds = text_model.get_input_embeddings()(torch.tensor([cls_token_id]*num_cls, device=text_enc.device))
