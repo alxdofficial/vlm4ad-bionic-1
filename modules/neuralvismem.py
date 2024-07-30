@@ -5,7 +5,7 @@ import torch.nn.functional as F
 # Define the input and output dimensions for internal modules
 INTERNAL_DIM = 768
 NUM_SUB_NETWORKS = 4
-NUM_LAYERS = 3
+NUM_LAYERS = 2
 NUM_MEMORY_NETWORKS = 8
 IMG_WIDTH = 1600
 IMG_HEIGHT = 900
@@ -183,6 +183,9 @@ class HebbianLayer(nn.Module):
             self.serotonin = torch.zeros(batch_size, self.dim, device=self.device)
             self.gaba = torch.zeros(batch_size, self.dim, device=self.device)
 
+        self.update_neuromodulators()
+        self.hebbian_update()
+
         # Compute recurrent input
         recurrent_input = torch.matmul(self.previous_activation, self.hebbian_recurrent_weights)  # (batch_size, dim)
         recurrent_input = self.layer_norm_recurrent(recurrent_input)
@@ -193,9 +196,7 @@ class HebbianLayer(nn.Module):
         activations = self.layer_norm_activations(activations)
         self.previous_activation = activations.detach()
 
-        self.update_neuromodulators()
-        self.hebbian_update()
-    
+
         return activations
 
     def hebbian_update(self):

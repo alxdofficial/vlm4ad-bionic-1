@@ -70,11 +70,13 @@ def custom_train(train_loss, val_loss, best_model, epochs, learning_rate):
         print('-------------------- EPOCH ' + str(epoch) + ' ---------------------')
         model.train()
         epoch_loss = 0
-        
+        i = 0
         for step, (inputs, imgs, labels) in tqdm(enumerate(train_dataloader), total=len(train_dataloader)):
 
             # print(inputs.shape, imgs.shape, labels.shape)
-
+            i += 1
+            if i % 20 == 0:
+                torch.cuda.empty_cache()
             # Forward pass through model
             outputs = model(inputs, imgs, labels)
 
@@ -291,11 +293,11 @@ if __name__ == '__main__':
 
     # Create Dataloaders
     train_dataloader = DataLoader(train_dset, shuffle=False, batch_size=config.batch_size,
-                                  num_workers=config.num_workers, collate_fn=train_dset.collate_fn)
+                                  num_workers=config.num_workers, collate_fn=train_dset.collate_fn, drop_last=True)
     val_dataloader = DataLoader(val_dset, shuffle=False, batch_size=config.batch_size,
-                                num_workers=config.num_workers, collate_fn=train_dset.collate_fn)
+                                num_workers=config.num_workers, collate_fn=train_dset.collate_fn, drop_last=True)
     test_dataloader = DataLoader(test_dset, shuffle=False, batch_size=config.batch_size,
-                                 num_workers=config.num_workers, collate_fn=train_dset.collate_fn)
+                                 num_workers=config.num_workers, collate_fn=train_dset.collate_fn, drop_last=True)
 
     if not config.hf_train:
 
