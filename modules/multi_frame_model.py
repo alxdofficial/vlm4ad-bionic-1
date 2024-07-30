@@ -81,7 +81,7 @@ class DriveVLMT5(nn.Module):
 
         def get_img_embedding(self, imgs, cls_tokens):
             # Ensure imgs and cls_tokens are lists
-            print(f"in mvp get img embedding, imgs shape: ", imgs.shape, f"   cls tokens shape {cls_tokens.shape}")
+            # print(f"in mvp get img embedding, imgs shape: ", imgs.shape, f"   cls tokens shape {cls_tokens.shape}")
             imgs = [imgs[:,i,:,:,:] for i in range(imgs.shape[1])] if not isinstance(imgs, list) else imgs
             cls_tokens = [cls_tokens[:,i,:] for i in range(cls_tokens.shape[1])] if not isinstance(cls_tokens, list) else cls_tokens
 
@@ -102,11 +102,11 @@ class DriveVLMT5(nn.Module):
         def forward(self, text_enc, imgs, text_model):
             # Get the text embeddings (batch_size, seq_length, hidden_size)
             text_embeddings = text_model.get_input_embeddings()(text_enc)
-            print(f"in mvp forward, text_embeddings shape: ", text_embeddings.shape)
-
-            # Add 3 cls token embeddings to the end of text embeddings
+            # print(f"in mvp forward, text_embeddings shape: ", text_embeddings.shape)
+            num_cls = 6
+            # Add num_cls cls token embeddings to the end of text embeddings
             cls_token_id = self.tokenizer.convert_tokens_to_ids('<cls>')  # Use the tokenizer to get the ID
-            cls_token_embeds = text_model.get_input_embeddings()(torch.tensor([cls_token_id]*3, device=text_enc.device))
+            cls_token_embeds = text_model.get_input_embeddings()(torch.tensor([cls_token_id]*num_cls, device=text_enc.device))
             cls_token_embeds = cls_token_embeds.unsqueeze(0).expand(text_embeddings.size(0), -1, -1)
             text_embeddings = torch.cat([text_embeddings, cls_token_embeds], dim=1)
 

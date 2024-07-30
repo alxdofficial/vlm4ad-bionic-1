@@ -4,11 +4,9 @@ import torch.nn.functional as F
 
 # Define the input and output dimensions for internal modules
 INTERNAL_DIM = 768
-NUM_SUB_NETWORKS = 8
-NUM_LAYERS = 5
-NUM_MEMORY_NETWORKS = 16
-NUM_NEURO_TRANSMITTERS = 4
-EMOTIONAL_DIM = 256
+NUM_SUB_NETWORKS = 2
+NUM_LAYERS = 2
+NUM_MEMORY_NETWORKS = 6
 IMG_WIDTH = 1600
 IMG_HEIGHT = 900
 
@@ -140,84 +138,120 @@ class VisionEncoder(nn.Module):
 
 # 4. Hebbian Layer
 # The HebbianLayer class defines a layer with Hebbian learning, where weights are updated based on the activity of neurons and the presence of a neuro modulators.    
-
 class HebbianLayer(nn.Module):
-    def __init__(self, dim, scaling, decay):
+    def __init__(self, dim, alpha_init=0.1, decay_init=0.01, device='cuda'):
         super(HebbianLayer, self).__init__()
-        self.weight = nn.Parameter(torch.randn(dim, dim))
-        self.recurrent_weight = nn.Parameter(torch.randn(dim, dim))
-        self.alpha = scaling  # Scaling parameter for Hebbian learning
-        self.decay = decay  # Decay parameter
-        self.prev_state = None
-        self.prev_input = None
-        self.layer_norm = nn.LayerNorm(dim)  # Layer normalization for the activations
-        self.max_magnitude = 3
+        self.dim = dim
+        self.device = device
+        
+        # Hebbian weights and recurrent weights
+        self.hebbian_weights = nn.Parameter(torch.randn(dim, dim, device=device) * 0.01)
+        self.hebbian_recurrent_weights = nn.Parameter(torch.randn(dim, dim, device=device) * 0.01)
+        
+        # Hebbian parameters
+        self.alpha = nn.Parameter(torch.full((dim,), alpha_init, device=device))
+        self.decay = nn.Parameter(torch.full((dim,), decay_init, device=device))
+        
+        # Neuromodulators
+        self.dopamine = None
+        self.serotonin = None
+        self.gaba = None
 
-        # Neurotransmitter signals
-        self.dopamine_signal = None
-        self.serotonin_signal = None
-        self.gaba_signal = None
-        self.glutamate_signal = None
+        # Layer normalization layers
+        self.layer_norm_activations = nn.LayerNorm(dim)
+        self.layer_norm_recurrent = nn.LayerNorm(dim)
+
+        # Neural network to predict neurotransmitters
+        self.neurotransmitter_predictor = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.ReLU(),
+            nn.Linear(dim, 3 * dim),  # 3 for dopamine, serotonin, gaba
+        )
+
+        # Store previous activations
+        self.previous_activation = None
+        self.previous_recurrent_activation = None
 
     def forward(self, x):
         batch_size = x.size(0)
-        dim = x.size(1)
         
-        if self.prev_state is None:
-            self.prev_state = torch.zeros(batch_size, dim, device=x.device)
+        # Initialize previous activations and neuromodulators if they are not set
+        if self.previous_activation is None:
+            self.previous_activation = torch.zeros(batch_size, self.dim, device=self.device)
+            self.previous_recurrent_activation = torch.zeros(batch_size, self.dim, device=self.device)
+            self.dopamine = torch.zeros(batch_size, self.dim, device=self.device)
+            self.serotonin = torch.zeros(batch_size, self.dim, device=self.device)
+            self.gaba = torch.zeros(batch_size, self.dim, device=self.device)
+
+        # Compute recurrent input
+        recurrent_input = torch.matmul(self.previous_activation, self.hebbian_recurrent_weights)  # (batch_size, dim)
+        recurrent_input = self.layer_norm_recurrent(recurrent_input)
+        self.previous_recurrent_activation = recurrent_input.detach()
         
-        if self.dopamine_signal is None:
-            self.dopamine_signal = torch.zeros(batch_size, device=x.device)
-            self.serotonin_signal = torch.zeros(batch_size, device=x.device)
-            self.gaba_signal = torch.zeros(batch_size, device=x.device)
-            self.glutamate_signal = torch.zeros(batch_size, device=x.device)
+        # Compute activations
+        activations = F.relu(torch.matmul(x, self.hebbian_weights) + recurrent_input)
+        activations = self.layer_norm_activations(activations)
+        self.previous_activation = activations.detach()
 
-        # Recurrent weight multiplication
-        combined_input = x + torch.matmul(self.prev_state, self.recurrent_weight.t())
-        
-        # Apply input weights
-        activations = torch.matmul(combined_input, self.weight.t())
-        activations = self.layer_norm(activations)
-
-        # Apply GABA and glutamate modulation
-        threshold = torch.mean(activations, dim=1, keepdim=True)
-        threshold += self.gaba_signal.unsqueeze(1)
-        threshold -= self.glutamate_signal.unsqueeze(1)
-        activations = torch.relu(activations - threshold)
-        activations = self.layer_norm(activations)
-
-        # Store current state for Hebbian update and next step
-        self.prev_input = x.detach().clone()  # Detach to avoid gradient computation
-        self.prev_state = activations.detach().clone()
-
+        self.update_neuromodulators()
+        self.hebbian_update()
+    
         return activations
 
     def hebbian_update(self):
-        with torch.no_grad():
-            hebbian_term_input = torch.matmul(self.prev_state.t(), self.prev_input)
-            batch_size = self.dopamine_signal.size(0)
-            dopamine_signal = self.dopamine_signal.view(batch_size, 1, 1)
+        def calculate_hebbian_updates(prev_activation, weights):
+            # Calculate softmax over activations and weights
+            activation_softmax = F.softmax(prev_activation, dim=1)
+            weight_softmax = F.softmax(weights, dim=1)
 
-            weight_update = self.alpha * dopamine_signal * hebbian_term_input.unsqueeze(0) / batch_size
-            self.weight.data = self.weight.data + weight_update.sum(dim=0)
+            # Calculate Hebbian updates
+            hebbian_updates = activation_softmax.unsqueeze(2) * weight_softmax.unsqueeze(0)
+            return hebbian_updates
 
-            hebbian_term_recurrent = torch.matmul(self.prev_state.t(), self.prev_state)
-            recurrent_weight_update = self.alpha * dopamine_signal * hebbian_term_recurrent.unsqueeze(0) / batch_size
-            self.recurrent_weight.data = self.recurrent_weight.data + recurrent_weight_update.sum(dim=0)
+        # Compute Hebbian updates for both regular and recurrent weights
+        hebbian_updates = calculate_hebbian_updates(self.previous_activation, self.hebbian_weights)
+        recurrent_hebbian_updates = calculate_hebbian_updates(self.previous_recurrent_activation, self.hebbian_recurrent_weights)
 
-            # Apply decay
-            self.weight.data = self.weight.data - self.decay * self.weight.data
-            self.recurrent_weight.data = self.recurrent_weight.data - self.decay * self.recurrent_weight.data
+        # Modulate updates with alpha and dopamine
+        modulated_alpha = self.alpha.unsqueeze(0) * self.dopamine * self.serotonin  # (batch_size, dim)
+        hebbian_updates = hebbian_updates * modulated_alpha.unsqueeze(1)  # (batch_size, dim, dim) * (batch_size, dim, 1)
+        recurrent_hebbian_updates = recurrent_hebbian_updates * modulated_alpha.unsqueeze(1)  # (batch_size, dim, dim) * (batch_size, dim, 1)
 
-            # Normalize weights
-            self.weight.data = nn.functional.normalize(self.weight.data, p=2, dim=1) * self.max_magnitude
-            self.recurrent_weight.data = nn.functional.normalize(self.recurrent_weight.data, p=2, dim=1) * self.max_magnitude
+        # Average over the batch dimension and apply updates to weights
+        weight_update = hebbian_updates.mean(dim=0)  # (dim, dim)
+        recurrent_weight_update = recurrent_hebbian_updates.mean(dim=0)  # (dim, dim)
 
-    def update_neuro_modulators(self, dopamine, serotonin, gaba, glutamate):
-        self.dopamine_signal = dopamine + (dopamine - self.dopamine_signal) * (1 - serotonin)
-        self.serotonin_signal = serotonin
-        self.gaba_signal = gaba
-        self.glutamate_signal = glutamate
+        # Apply updates to weights and recurrent weights
+        updated_weights = self.hebbian_weights + weight_update
+        updated_recurrent_weights = self.hebbian_recurrent_weights + recurrent_weight_update
+
+        # Apply neuron-specific decay to weights, scaled by GABA, ensuring they decay towards zero
+        scaled_decay = self.decay * torch.sigmoid(self.gaba.mean(dim=0))
+        decay_matrix = torch.diag(scaled_decay)
+        updated_weights = updated_weights - torch.matmul(decay_matrix, self.hebbian_weights)
+        updated_recurrent_weights = updated_recurrent_weights - torch.matmul(decay_matrix, self.hebbian_recurrent_weights)
+
+        self.hebbian_weights.data.copy_(updated_weights)
+        self.hebbian_recurrent_weights.data.copy_(updated_recurrent_weights)
+
+    def update_neuromodulators(self):
+        # Predict new neurotransmitter updates using the previous activation
+        neurotransmitter_output = self.neurotransmitter_predictor(self.previous_activation)
+        neurotransmitter_output = neurotransmitter_output.view(-1, self.dim, 3)  # (batch_size, dim, 3)
+
+        # Extract neurotransmitter predictions
+        pred_dopamine, pred_serotonin, pred_gaba = neurotransmitter_output.unbind(dim=2)
+
+        # Calculate inverse scale based on serotonin magnitude
+        serotonin_magnitude = pred_serotonin.clamp(min=1e-6)  # Avoid division by zero
+        inverse_scale = 1 / serotonin_magnitude
+
+        # Detach the current neuromodulator values before updating them
+        self.dopamine = torch.tanh(self.dopamine.detach() + pred_dopamine * inverse_scale)
+        self.serotonin = torch.sigmoid(self.serotonin.detach() + pred_serotonin)
+        self.gaba = torch.sigmoid(self.gaba.detach() + pred_gaba * inverse_scale)
+    
+
 
 # 5. SubNetwork
 # The SubNetwork class stacks multiple HebbianLayers to create a more complex subnetwork.
@@ -235,55 +269,6 @@ class SubNetwork(nn.Module):
             x = layer(x)
         return x
 
-    def update_neuro_modulators(self, neurotransmitter_signals):
-        # neurotransmitter_signals: (batch_size, num_layers, 4)
-        batch_size = neurotransmitter_signals.size(0)
-        num_layers = neurotransmitter_signals.size(1)
-        
-        for i, layer in enumerate(self.layers):
-            # Extract neurotransmitter signals for the current layer across the batch
-            dopamine_signal = neurotransmitter_signals[:, i, 0]  # (batch_size,)
-            serotonin_signal = neurotransmitter_signals[:, i, 1]  # (batch_size,)
-            gaba_signal = neurotransmitter_signals[:, i, 2]  # (batch_size,)
-            glutamate_signal = neurotransmitter_signals[:, i, 3]  # (batch_size,)
-            
-            # Update neurotransmitters for the entire batch at once
-            layer.update_neuro_modulators(
-                dopamine_signal,
-                serotonin_signal,
-                gaba_signal,
-                glutamate_signal
-            )
-
-# 6. EmotionalModule
-# The EmotionalModule class generates dopamine, serotonin, GABA, etc. signals based on the sensory input and the activations from the networks.
-class EmotionalModule(nn.Module):
-    def __init__(self, input_size, num_subnetworks, num_layers):
-        super(EmotionalModule, self).__init__()
-        self.fc1 = nn.Linear(input_size, EMOTIONAL_DIM)
-        self.fc2 = nn.Linear(EMOTIONAL_DIM, num_subnetworks * num_layers * NUM_NEURO_TRANSMITTERS)
-        self.num_layers = num_layers
-        self.num_neurotransmitters = NUM_NEURO_TRANSMITTERS
-
-    def forward(self, combined_sensory_encoding, activations):
-        # Ensure activations are detached to prevent gradients from flowing back
-        activations = activations.detach()
-        batch_size = combined_sensory_encoding.size(0)
-
-        # Concatenate along the feature dimension
-        x = torch.cat([combined_sensory_encoding, activations], dim=-1)  # Shape: (batch, 2 * dim)
-        x = F.relu(self.fc1(x))  # Shape: (batch, EMOTIONAL_DIM)
-
-        # Generate neurotransmitter signals
-        neurotransmitter_signals = torch.tanh(self.fc2(x))  # Output range [-1, 1]
-        # Shape: (batch, num_subnetworks * num_layers * num_neurotransmitters)
-
-        # Reshape the output to (batch, num_subnetworks, num_layers, num_neurotransmitters)
-        neurotransmitter_signals = neurotransmitter_signals.view(
-            batch_size, -1, self.num_layers, self.num_neurotransmitters
-        )
-
-        return neurotransmitter_signals  # Shape: (batch, num_subnetworks, num_layers, num_neurotransmitters)
 
 # 7. Neural Memory Network
 # The NeuralMemoryNetwork class combines multiple subnetworks and an emotional module to form a memory network that can update its weights based on neurotransmitter signals.    
@@ -299,7 +284,6 @@ class NeuralMemoryNetwork(nn.Module):
             self.subnetworks.append(SubNetwork(self.hidden_size, num_layers))
 
         self.output_layer = nn.Linear(INTERNAL_DIM, INTERNAL_DIM)
-        self.emotional_module = EmotionalModule(INTERNAL_DIM + INTERNAL_DIM, num_subnetworks, num_layers)
         self.layer_norm = nn.LayerNorm(INTERNAL_DIM)  # Apply layer normalization
 
         self.prev_loss = None
@@ -322,17 +306,6 @@ class NeuralMemoryNetwork(nn.Module):
         final_output = self.layer_norm(final_output)  # (batch_size, INTERNAL_DIM)
         self.activations = final_output
         return final_output
-
-    def update_neuro_modulators(self, combined_sensory_encoding):
-        # Get activations
-        activations = self.activations.detach()  # (batch_size, INTERNAL_DIM)
-
-        # Compute neurotransmitter signals
-        neurotransmitter_signals = self.emotional_module(combined_sensory_encoding, activations)  # (batch_size, num_subnetworks, num_layers, NUM_NEURO_TRANSMITTERS)
-
-        # Iterate through each subnetwork and update neurotransmitters
-        for i, subnetwork in enumerate(self.subnetworks):
-            subnetwork.update_neuro_modulators(neurotransmitter_signals[:, i, :, :])  # (batch_size, num_layers, NUM_NEURO_TRANSMITTERS)
 
 
 # 9. textual Feature Adaptor
@@ -393,7 +366,7 @@ class Brain(nn.Module):
         self.fovea_combined = None
 
     def forward(self, imgs, cls_tokens):
-        print("in brain forward")
+        # print("in brain forward")
         # process peripheral vision for all cameras
         peripheral_encodings = []
         for i, img in enumerate(imgs):
@@ -401,19 +374,18 @@ class Brain(nn.Module):
             peripheral_encoding = self.vision_encoder.forward_peripheral(img)
             # print(f"in brain forward, periph encoding shape: ", peripheral_encoding.shape)
             peripheral_encodings.append(peripheral_encoding)
-        print("peripheral embeddings made")
+        # print("peripheral embeddings made")
         # Combine encodings of images peripheral
         peripheral_combined = self.attention(peripheral_encodings[0], peripheral_encodings[1:])
         self.peripheral_combined = peripheral_combined.clone().detach()  # save for emotional module in hebbian update
-        print("peripheral embeddings combined")
+        # print("peripheral embeddings combined")
         # store all memory network outputs here
         final_outputs_of_all_memory_networks = []
         
         # write peripheral vision experience to memory
         for nmn in self.neural_memory_networks:
             final_outputs_of_all_memory_networks.append(nmn(peripheral_combined))
-            nmn.update_neuro_modulators(self.peripheral_combined)
-        print("peripheral embeddings written to memory")
+        # print("peripheral embeddings written to memory")
         # Process fovea vision using CLS tokens
         for cls in cls_tokens:
             fovea_encodings = []
@@ -422,22 +394,21 @@ class Brain(nn.Module):
                 fovea_coords = self.fovea_loc_pred(peripheral_encodings[i], cls)
                 # Process fovea using the predicted coordinates
                 fovea_encoding = self.vision_encoder.forward_fovea(img, fovea_coords)
-                print(f"in brain forward, fovea encoding shape: ", fovea_encoding.shape)
+                # print(f"in brain forward, fovea encoding shape: ", fovea_encoding.shape)
                 fovea_encodings.append(fovea_encoding)
 
             # Combine fovea encodings using the attention module
             fovea_combined = self.attention(fovea_encodings[0], fovea_encodings[1:])
             self.fovea_combined = fovea_combined.clone().detach()  # Save for use in neuro modulator updates
-            print(f"in brain forward, fovea combined shape: ", fovea_combined.shape)
+            # print(f"in brain forward, fovea combined shape: ", fovea_combined.shape)
             # Pass the combined fovea encoding into neural memory networks
             for nmn in self.neural_memory_networks:
                 nmn_output = nmn(fovea_combined)
                 final_outputs_of_all_memory_networks.append(nmn_output)
-                nmn.update_neuro_modulators(self.fovea_combined)
-            print("fovea embeddings written to memory")
+            # print("fovea embeddings written to memory")
 
         # Stack the outputs along a new sequence dimension
         final_outputs_of_all_memory_networks = torch.stack(final_outputs_of_all_memory_networks, dim=1)  # (batch, seqlen, dim)
-        print("returning all memory outputs")
+        # print("returning all memory outputs")
 
         return final_outputs_of_all_memory_networks

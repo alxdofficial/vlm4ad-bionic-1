@@ -70,7 +70,7 @@ def custom_train(train_loss, val_loss, best_model, epochs, learning_rate):
         print('-------------------- EPOCH ' + str(epoch) + ' ---------------------')
         model.train()
         epoch_loss = 0
-
+        
         for step, (inputs, imgs, labels) in tqdm(enumerate(train_dataloader), total=len(train_dataloader)):
 
             # print(inputs.shape, imgs.shape, labels.shape)
@@ -107,6 +107,10 @@ def custom_train(train_loss, val_loss, best_model, epochs, learning_rate):
 
             # Back-propogate
             loss.backward()
+            # zero out gradeints of hebbian params that shouldnt be updated using backprop
+            for name, param in model.named_parameters():
+                if 'hebbian_weights' in name or 'hebbian_recurrent_weights' in name:
+                    param.grad = None
             optimizer.step()
             optimizer.zero_grad()
 
@@ -227,7 +231,7 @@ def params():
 
 if __name__ == '__main__':
 
-    torch.autograd.set_detect_anomaly(True)
+    # torch.autograd.set_detect_anomaly(True)
 
     timestr = time.strftime("%Y%m%d-%H%M%S")
 
