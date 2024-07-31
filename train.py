@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from copy import deepcopy
 from tqdm import tqdm
+import gc
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -70,13 +71,15 @@ def custom_train(train_loss, val_loss, best_model, epochs, learning_rate):
         print('-------------------- EPOCH ' + str(epoch) + ' ---------------------')
         model.train()
         epoch_loss = 0
+
         i = 0
         for step, (inputs, imgs, labels) in tqdm(enumerate(train_dataloader), total=len(train_dataloader)):
-
-            # print(inputs.shape, imgs.shape, labels.shape)
             i += 1
-            # if i % 20 == 0:
-            #     torch.cuda.empty_cache()
+            if i % 100 == 0:
+                gc.collect()  # Collect garbage to free CPU memory
+                torch.cuda.empty_cache()  # Free up GPU memory
+            # print(inputs.shape, imgs.shape, labels.shape)
+           
             # Forward pass through model
             outputs = model(inputs, imgs, labels)
 
@@ -94,18 +97,21 @@ def custom_train(train_loss, val_loss, best_model, epochs, learning_rate):
                 # Perform decoding (e.g., greedy decoding)
                 outputs = torch.argmax(hidden_states, dim=-1)
 
-                text_outputs = [processor.decode(output.to('cpu'), skip_special_tokens=True) for output in outputs]
-                text_questions = [processor.decode(q.to('cpu'), skip_special_tokens=True) for q in inputs]
-                text_labels = [processor.decode(a.to('cpu'), skip_special_tokens=True) for a in labels]
-                print()
-                print('Questions:')
-                print(text_questions)
-                print()
-                print('Generated Answers:')
-                print(text_outputs)
-                print()
-                print('Ground Truth Answers:')
-                print(text_labels)
+                try:
+                    text_outputs = [processor.decode(output.to('cpu'), skip_special_tokens=True) for output in outputs]
+                    text_questions = [processor.decode(q.to('cpu'), skip_special_tokens=True) for q in inputs]
+                    text_labels = [processor.decode(a.to('cpu'), skip_special_tokens=True) for a in labels]
+                    print()
+                    print('Questions:')
+                    print(text_questions)
+                    print()
+                    print('Generated Answers:')
+                    print(text_outputs)
+                    print()
+                    print('Ground Truth Answers:')
+                    print(text_labels)
+                except:
+                    print("printout qa example errored out")
 
             # Back-propogate
             loss.backward()

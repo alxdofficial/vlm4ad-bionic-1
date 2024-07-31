@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 # Define the input and output dimensions for internal modules
 INTERNAL_DIM = 768
-NUM_SUB_NETWORKS = 4
+NUM_SUB_NETWORKS = 2
 NUM_LAYERS = 2
 NUM_MEMORY_NETWORKS = 8
 IMG_WIDTH = 1600
@@ -210,8 +210,8 @@ class HebbianLayer(nn.Module):
             return hebbian_updates
 
         # Compute Hebbian updates for both regular and recurrent weights
-        hebbian_updates = calculate_hebbian_updates(self.previous_activation, self.hebbian_weights)
-        recurrent_hebbian_updates = calculate_hebbian_updates(self.previous_recurrent_activation, self.hebbian_recurrent_weights)
+        hebbian_updates = calculate_hebbian_updates(self.previous_activation, self.hebbian_weights.detach())
+        recurrent_hebbian_updates = calculate_hebbian_updates(self.previous_recurrent_activation, self.hebbian_recurrent_weights.detach())
 
         # Modulate updates with alpha and dopamine
         modulated_alpha = self.alpha.unsqueeze(0) * self.dopamine * self.serotonin  # (batch_size, dim)
@@ -223,14 +223,14 @@ class HebbianLayer(nn.Module):
         recurrent_weight_update = recurrent_hebbian_updates.mean(dim=0)  # (dim, dim)
 
         # Apply updates to weights and recurrent weights
-        updated_weights = self.hebbian_weights + weight_update
-        updated_recurrent_weights = self.hebbian_recurrent_weights + recurrent_weight_update
+        updated_weights = self.hebbian_weights.detach() + weight_update
+        updated_recurrent_weights = self.hebbian_recurrent_weights.detach() + recurrent_weight_update
 
         # Apply neuron-specific decay to weights, scaled by GABA, ensuring they decay towards zero
         scaled_decay = self.decay * torch.sigmoid(self.gaba.mean(dim=0))
         decay_matrix = torch.diag(scaled_decay)
-        updated_weights = updated_weights - torch.matmul(decay_matrix, self.hebbian_weights)
-        updated_recurrent_weights = updated_recurrent_weights - torch.matmul(decay_matrix, self.hebbian_recurrent_weights)
+        updated_weights = updated_weights - torch.matmul(decay_matrix, self.hebbian_weights.detach())
+        updated_recurrent_weights = updated_recurrent_weights - torch.matmul(decay_matrix, self.hebbian_recurrent_weights.detach())
 
         self.hebbian_weights.data.copy_(updated_weights)
         self.hebbian_recurrent_weights.data.copy_(updated_recurrent_weights)
@@ -363,8 +363,6 @@ class Brain(nn.Module):
         # Attention mechanism
         self.attention = AttentionModule(embed_dim=INTERNAL_DIM, num_heads=8)
 
-        self.peripheral_combined = None
-        self.fovea_combined = None
 
     def forward(self, imgs, cls_tokens):
         # print("in brain forward")
@@ -378,7 +376,6 @@ class Brain(nn.Module):
         # print("peripheral embeddings made")
         # Combine encodings of images peripheral
         peripheral_combined = self.attention(peripheral_encodings[0], peripheral_encodings[1:])
-        self.peripheral_combined = peripheral_combined.clone().detach()  # save for emotional module in hebbian update
         # print("peripheral embeddings combined")
         # store all memory network outputs here
         final_outputs_of_all_memory_networks = []
@@ -400,7 +397,6 @@ class Brain(nn.Module):
 
             # Combine fovea encodings using the attention module
             fovea_combined = self.attention(fovea_encodings[0], fovea_encodings[1:])
-            self.fovea_combined = fovea_combined.clone().detach()  # Save for use in neuro modulator updates
             # print(f"in brain forward, fovea combined shape: ", fovea_combined.shape)
             # Pass the combined fovea encoding into neural memory networks
             for nmn in self.neural_memory_networks:
